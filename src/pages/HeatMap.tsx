@@ -1,8 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import L from "leaflet";
 import { motion } from "framer-motion";
-import { zones, getRiskColor, getRiskBg } from "@/data/mockData";
+import { zones, getRiskColor } from "@/data/mockData";
 import "leaflet/dist/leaflet.css";
+import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
+import { toast } from "sonner";
+import { MapPin, Navigation } from "lucide-react";
 
 const layers = ["Temperature", "Humidity", "AQI", "Vulnerability"] as const;
 
@@ -10,6 +15,9 @@ export default function HeatMap() {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<L.Map | null>(null);
   const [activeLayers, setActiveLayers] = useState<Set<string>>(new Set(["Temperature", "Vulnerability"]));
+  const [manualMode, setManualMode] = useState(false);
+  const [selectedLocation, setSelectedLocation] = useState<{ lat: number; lng: number } | null>(null);
+  const markerRef = useRef<L.Marker | null>(null);
 
   const toggleLayer = (layer: string) => {
     setActiveLayers((prev) => {
@@ -17,6 +25,27 @@ export default function HeatMap() {
       next.has(layer) ? next.delete(layer) : next.add(layer);
       return next;
     });
+  };
+
+  const fetchHeatmapData = async (map: L.Map) => {
+    try {
+      const response = await fetch("http://localhost:5000/api/heatmap/heatmap-data");
+      if (response.ok) {
+        const data = await response.json();
+        data.forEach((point: any) => {
+          const color = getRiskColor("High"); // Simple logic for now, or based on temp
+          L.circleMarker([point.latitude, point.longitude], {
+            radius: 10,
+            color: color,
+            fillColor: color,
+            fillOpacity: 0.6,
+            weight: 1
+          }).addTo(map).bindPopup(`Temp: ${point.temperature || 'N/A'}`);
+        });
+      }
+    } catch (err) {
+      console.error("Failed to fetch heatmap data", err);
+    }
   };
 
   useEffect(() => {
@@ -32,44 +61,25 @@ export default function HeatMap() {
       attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
     }).addTo(map);
 
+    // Load mock data (legacy)
     zones.forEach((zone) => {
       const color = getRiskColor(zone.riskLevel);
-      const circle = L.circleMarker([zone.lat, zone.lng], {
+      L.circleMarker([zone.lat, zone.lng], {
         radius: Math.max(12, zone.vulnerabilityScore / 3),
         color,
         fillColor: color,
         fillOpacity: 0.4,
         weight: 2,
-      }).addTo(map);
+      }).addTo(map).bindPopup(`<b>${zone.name}</b><br>Risk: ${zone.riskLevel}`);
+    });
 
-      circle.bindPopup(`
-        <div style="min-width:220px;font-family:'DM Sans',sans-serif;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-            <strong style="font-family:'Space Grotesk',sans-serif;">${zone.name}</strong>
-            <span style="padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700;text-transform:uppercase;background:${color}22;color:${color};border:1px solid ${color}44;">
-              ${zone.riskLevel}
-            </span>
-          </div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:12px;margin-bottom:8px;">
-            <span>🌡️ ${zone.temperature}°C</span>
-            <span>💧 ${zone.humidity}%</span>
-            <span>🌫️ AQI ${zone.aqi}</span>
-            <span>👥 ${(zone.population / 1000).toFixed(0)}K</span>
-          </div>
-          <div style="border-top:1px solid #333;padding-top:8px;margin-bottom:4px;">
-            <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
-              <span style="opacity:0.7;">Vulnerability Score</span>
-              <strong>${zone.vulnerabilityScore}/100</strong>
-            </div>
-            <div style="width:100%;height:6px;background:#222;border-radius:4px;overflow:hidden;">
-              <div style="width:${zone.vulnerabilityScore}%;height:100%;background:${color};border-radius:4px;"></div>
-            </div>
-          </div>
-          <div style="font-size:11px;opacity:0.7;margin-top:8px;">
-            🏥 ${zone.nearestHospital} (${zone.hospitalDistance})
-          </div>
-        </div>
-      `);
+    // Fetch real data
+    fetchHeatmapData(map);
+
+    map.on('click', (e) => {
+      if (manualMode) {
+        handleMapClick(e.latlng.lat, e.latlng.lng);
+      }
     });
 
     mapInstance.current = map;
@@ -78,10 +88,139 @@ export default function HeatMap() {
       map.remove();
       mapInstance.current = null;
     };
-  }, []);
+  }, []); // Run once on mount
+
+  // Effect to handle manual mode toggling and click listener updates
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map) return;
+
+    map.off('click'); // Remove old listener
+    map.on('click', (e) => {
+      if (manualMode) {
+        handleMapClick(e.latlng.lat, e.latlng.lng);
+      }
+    });
+  }, [manualMode]);
+
+
+  const handleMapClick = (lat: number, lng: number) => {
+    setSelectedLocation({ lat, lng });
+    if (markerRef.current) {
+      markerRef.current.setLatLng([lat, lng]);
+    } else if (mapInstance.current) {
+      markerRef.current = L.marker([lat, lng]).addTo(mapInstance.current);
+    }
+    toast.info(`Selected: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+  };
+
+  const handleAutoLocation = () => {
+    if (!navigator.geolocation) {
+      toast.error("Geolocation is not supported by your browser");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords;
+        handleMapClick(latitude, longitude);
+        if (mapInstance.current) {
+          mapInstance.current.setView([latitude, longitude], 12);
+        }
+        toast.success("Location detected!");
+      },
+      () => {
+        toast.error("Unable to retrieve your location");
+      }
+    );
+  };
+
+  const submitLocation = async () => {
+    if (!selectedLocation) {
+      toast.error("Please select a location first");
+      return;
+    }
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      toast.error("You must be logged in to report data");
+      return;
+    }
+
+    try {
+      const response = await fetch("http://localhost:5000/api/heatmap/location", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          latitude: selectedLocation.lat,
+          longitude: selectedLocation.lng,
+          temperature: 35 + Math.random() * 10 // Simulating temp reading
+        })
+      });
+
+      if (response.ok) {
+        toast.success("Location report submitted!");
+        setSelectedLocation(null);
+        if (markerRef.current && mapInstance.current) {
+          mapInstance.current.removeLayer(markerRef.current);
+          markerRef.current = null;
+        }
+        // Refresh data
+        if (mapInstance.current) fetchHeatmapData(mapInstance.current);
+      } else {
+        toast.error("Failed to submit report");
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error("Error submitting report");
+    }
+  };
 
   return (
     <div className="h-[calc(100vh-4rem)] relative">
+      {/* Report Controls */}
+      <div className="absolute top-4 left-4 z-[1000]">
+        <motion.div
+          initial={{ opacity: 0, x: -20 }}
+          animate={{ opacity: 1, x: 0 }}
+          className="glass-card p-4 w-64 space-y-4"
+        >
+          <h3 className="font-bold text-sm uppercase tracking-wider text-muted-foreground">Report Heat</h3>
+
+          <div className="flex items-center justify-between">
+            <Label htmlFor="mode-toggle">Manual Mode</Label>
+            <Switch
+              id="mode-toggle"
+              checked={manualMode}
+              onCheckedChange={setManualMode}
+            />
+          </div>
+
+          {!manualMode ? (
+            <Button onClick={handleAutoLocation} className="w-full gap-2" variant="secondary">
+              <Navigation className="w-4 h-4" /> Detect Location
+            </Button>
+          ) : (
+            <div className="text-xs text-muted-foreground">
+              Click on the map to select a location.
+            </div>
+          )}
+
+          {selectedLocation && (
+            <div className="text-xs bg-background/50 p-2 rounded">
+              Lat: {selectedLocation.lat.toFixed(4)}<br />
+              Lng: {selectedLocation.lng.toFixed(4)}
+            </div>
+          )}
+
+          <Button onClick={submitLocation} className="w-full gap-2" disabled={!selectedLocation}>
+            <MapPin className="w-4 h-4" /> Submit Report
+          </Button>
+        </motion.div>
+      </div>
+
       {/* Layer controls */}
       <div className="absolute top-4 right-4 z-[1000]">
         <motion.div
@@ -94,39 +233,14 @@ export default function HeatMap() {
             <button
               key={layer}
               onClick={() => toggleLayer(layer)}
-              className={`block w-full text-left px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                activeLayers.has(layer)
+              className={`block w-full text-left px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${activeLayers.has(layer)
                   ? "bg-primary/15 text-primary"
                   : "text-muted-foreground hover:text-foreground"
-              }`}
+                }`}
             >
               {layer}
             </button>
           ))}
-        </motion.div>
-      </div>
-
-      {/* Legend */}
-      <div className="absolute bottom-4 left-4 z-[1000]">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="glass-card p-3"
-        >
-          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-2">Risk Level</p>
-          <div className="space-y-1.5">
-            {[
-              { label: "Extreme (80+)", color: "bg-heat-red" },
-              { label: "High (60-79)", color: "bg-heat-orange" },
-              { label: "Moderate (40-59)", color: "bg-heat-yellow" },
-              { label: "Safe (<40)", color: "bg-heat-green" },
-            ].map((l) => (
-              <div key={l.label} className="flex items-center gap-2">
-                <div className={`w-3 h-3 rounded-full ${l.color}`} />
-                <span className="text-xs text-muted-foreground">{l.label}</span>
-              </div>
-            ))}
-          </div>
         </motion.div>
       </div>
 
